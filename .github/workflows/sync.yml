@@ -27,7 +27,7 @@ jobs:
           # 你的目标分支（通常是 main 或 master）
           target_sync_branch: main
           # 必须使用刚才设置的 ACTION_TOKEN，不能用 GITHUB_TOKEN
-          target_repo_token: ${{ secrets.ACTION_TOKEN }}
+          target_repo_token: ${{ secrets.Git_Repo_Sync_Action }}
 
           # 上游仓库地址 (格式：用户名/仓库名)
           # 【请修改这里！】
