@@ -24,19 +24,15 @@ jobs:
         id: sync
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
         with:
-          # 你的目标分支（通常是 main 或 master）
+          # 目标分支（通常是 main 或 master）
           target_sync_branch: main
-          # 必须使用刚才设置的 ACTION_TOKEN，不能用 GITHUB_TOKEN
+          # 必须使用配置好的有权限的 PAT 作为 ACTION_TOKEN，不能用 GITHUB_TOKEN
           target_repo_token: ${{ secrets.Git_Repo_Sync_Action }}
-
           # 上游仓库地址 (格式：用户名/仓库名)
-          # 【请修改这里！】
           upstream_sync_repo: cmliu/edgetunnel
           upstream_sync_branch: main
-
           #如果是公开仓库，下面这一行不需要，如果是私有上游才需要
           # upstream_repo_access_token: ${{ secrets.UPSTREAM_ACCESS_TOKEN }}
-
           # 测试模式：设为 false 才会真正执行 push
           test_mode: false
 
@@ -44,7 +40,14 @@ jobs:
       - name: New commits found
         if: steps.sync.outputs.has_new_commits == 'true'
         run: echo "New commits were found to sync."
-
       - name: No new commits
         if: steps.sync.outputs.has_new_commits == 'false'
         run: echo "There were no new commits."
+
+  workflow-keepalive:
+    if: github.event_name == 'schedule'  # 只在定时事件运行
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write  # 必需权限，用于 API 调用
+    steps:
+      - uses: liskin/gh-workflow-keepalive@v1
