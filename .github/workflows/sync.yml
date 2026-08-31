@@ -5,13 +5,20 @@ permissions:
 
 on:
   schedule:
-    - cron: "0 0 * * *" # every day
-  workflow_dispatch:
+    - cron: "0 0 * * *" # 每天 UTC 00:00，北京时间 08:00
+  workflow_dispatch: # 支持手动触发
+
+# 防止定时任务和手动任务同时修改 main
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
 
 jobs:
   sync_latest_from_upstream:
     name: Sync latest commits from upstream repo
     runs-on: ubuntu-latest
+
+    # 只允许 Fork 仓库执行，防止误配置到上游仓库
     if: ${{ github.event.repository.fork }}
 
     steps:
@@ -22,23 +29,121 @@ jobs:
           ref: main
 
       - name: Sync upstream changes
+        id: sync
+        shell: bash
         run: |
+          set -e
+
           git config user.name "GH Action - Upstream Sync"
           git config user.email "action@github.com"
 
-          git remote add upstream https://github.com/cmliu/edgetunnel.git
-          git fetch upstream main
-
-          if git diff --quiet HEAD upstream/main; then
-            # 内容和上游一致，直接对齐，顺带清理历史分叉留下的多余 merge commit
-            git reset --hard upstream/main
-            git push --force-with-lease origin main
+          # 添加 / 更新 upstream
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/cmliu/edgetunnel.git
           else
-            # 有本地修改，保持原来的合并方式，不覆盖任何人的改动
-            if ! git pull --no-rebase upstream main; then
-              echo "[Error] 合并上游变更产生冲突，自动同步已暂停，请手动 Sync Fork 并解决冲突。"
-              echo "[Error] Merge conflict detected while syncing upstream. Please sync your fork manually and resolve the conflicts."
-              exit 1
-            fi
-            git push origin main
+            git remote add upstream https://github.com/cmliu/edgetunnel.git
           fi
+
+          # 获取上游 main
+          git fetch upstream main --prune
+
+          LOCAL_HEAD="$(git rev-parse HEAD)"
+          UPSTREAM_HEAD="$(git rev-parse upstream/main)"
+
+          echo "Local HEAD:    $LOCAL_HEAD"
+          echo "Upstream HEAD: $UPSTREAM_HEAD"
+
+          # 情况 1：完全相同
+          if git diff --quiet HEAD upstream/main; then
+            echo "### Sync status" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ Local content is already identical to upstream." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Upstream: \`$UPSTREAM_HEAD\`" >> "$GITHUB_STEP_SUMMARY"
+
+            # 内容完全一致但历史已经分叉：
+            # 直接对齐到 upstream，清理多余的历史分叉 / merge commit
+            if [ "$LOCAL_HEAD" != "$UPSTREAM_HEAD" ]; then
+              echo "Content is identical but git history has diverged."
+              echo "Resetting main to upstream/main..."
+
+              git reset --hard upstream/main
+              git push --force-with-lease origin main
+
+              echo "✅ Main history was realigned with upstream." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "No changes required."
+            fi
+
+            echo "has_new_commits=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 情况 2：本地已经包含全部 upstream 提交
+          # 说明只是 fork 自己领先，不需要再 merge
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Local main already contains upstream/main."
+            echo "No sync required."
+
+            echo "### Sync status" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ Upstream is already fully contained in local main." >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ No new upstream commits to sync." >> "$GITHUB_STEP_SUMMARY"
+
+            echo "has_new_commits=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 情况 3 / 4：
+          # - upstream 比本地新，但本地没有自己的分叉：merge 会自动 fast-forward
+          # - 双方都存在不同提交：执行普通 merge
+          echo "Upstream contains changes that are not present locally."
+          echo "Attempting to merge upstream/main..."
+
+          if ! git merge --no-edit upstream/main; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Sync status" >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ Merge conflict detected." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Automatic sync has been stopped." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Please sync this fork manually and resolve the conflicts." >> "$GITHUB_STEP_SUMMARY"
+
+            echo "[Error] 合并上游变更产生冲突，自动同步已暂停。"
+            echo "[Error] 请手动 Sync Fork 并解决冲突后再运行此 workflow。"
+            echo "[Error] Merge conflict detected while syncing upstream."
+            exit 1
+          fi
+
+          # 推送 merge / fast-forward 后的 main
+          git push origin main
+
+          NEW_HEAD="$(git rev-parse HEAD)"
+
+          echo "### Sync status" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Upstream changes successfully synced." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Before:   \`$LOCAL_HEAD\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Upstream: \`$UPSTREAM_HEAD\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "After:    \`$NEW_HEAD\`" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "has_new_commits=true" >> "$GITHUB_OUTPUT"
+
+      - name: New commits found
+        if: steps.sync.outputs.has_new_commits == 'true'
+        run: echo "✅ New upstream commits were synced successfully."
+
+      - name: No new commits
+        if: steps.sync.outputs.has_new_commits == 'false'
+        run: echo "ℹ️ There were no upstream commits requiring synchronization."
+
+  # 防止 GitHub 因仓库长期无活动而自动停用 scheduled workflows
+  workflow-keepalive:
+    name: Keep scheduled workflow alive
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      actions: write
+
+    steps:
+      - name: Keep workflow enabled
+        uses: liskin/gh-workflow-keepalive@v1
